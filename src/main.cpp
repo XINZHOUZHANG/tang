@@ -1,214 +1,113 @@
 #include <Arduino.h>
-#include <SPI.h>
 #include <SD.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7735.h>
-#include <U8g2_for_Adafruit_GFX.h>
+#include <esp_ota_ops.h>
 
-// ================= 引脚与硬件配置 =================
-#define TFT_CS      5
-#define TFT_DC      4
-#define TFT_RST     19
-#define SD_CS       22
-#define BUZZER_PIN  14
+// 引入底层封装好的硬件模块
+#include "pins.h"
+#include "display.h"
+#include "buttons.h"
+#include "buzzer.h"
 
-// 按键引脚定义 (注意 34和35 仅支持输入，需外部上拉或硬件电路支持)
-#define BTN_UP      2
-#define BTN_DOWN    13
-#define BTN_LEFT    27
-#define BTN_RIGHT   35
-#define BTN_A       34
-#define BTN_B       12
+// 注意：由于底层换成了 TFT_eSPI，要在屏幕上渲染中文字体，
+// 你后续需要在 platformio.ini 的 lib_deps 中引入 U8g2_for_TFT_eSPI 库。
+// #include <U8g2_for_TFT_eSPI.h>
+// U8G2_FOR_TFT_eSPI u8g2Fonts;
 
-// 颜色定义补全 (使用你之前修复的灰色)
-#define COLOR_DARKGREY 0x7BEF 
+// ==========================================
+// 核心功能：返回 Launcher 启动器
+// ==========================================
+void returnToLauncher() {
+    Serial.println("Preparing to exit to Launcher...");
 
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
-U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
+    // 调用现成的屏幕模块清屏并显示退出提示
+    display_clear();
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setCursor(10, 60);
+    tft.print("Exiting to Menu...");
 
-// ================= 诗词索引引擎 =================
-const int MAX_POEMS = 350;       // 最多支持缓存 350 首诗的索引
-uint32_t poemOffsets[MAX_POEMS]; // 保存每首诗在 TXT 文件中的起始字节位置
-int totalPoems = 0;              // 实际读取到的诗词总数
-int currentPoemIndex = 0;        // 当前正在阅读的诗词序号
+    // 寻找出厂分区（Factory Partition），这是 Launcher 系统的驻留位置
+    const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
 
-// 按键防抖变量
-unsigned long lastButtonPress = 0;
-const int DEBOUNCE_DELAY = 200;
+    if (factory_partition != NULL) {
+        esp_ota_set_boot_partition(factory_partition);
+        delay(500);
+        ESP.restart(); // 强制重启，控制权交还给 Launcher
+    } else {
+        tft.setCursor(10, 80);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.print("Launcher Not Found!");
+    }
+}
 
-// ================= 函数声明 =================
-void buildPoemIndex();
-void displayPoem(int index);
-void beep();
-
+// ==========================================
+// 初始化设置 (Setup)
+// ==========================================
 void setup() {
-  Serial.begin(115200);
+    Serial.begin(115200);
+    delay(500);
 
-  // 初始化蜂鸣器
-  pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);
+    // 1. 初始化所有底层模块
+    display_init();  
+    buttons_init();  
+    buzzer_init();   
 
-  // 初始化按键 (带内部上拉的引脚)
-  pinMode(BTN_UP, INPUT_PULLUP);
-  pinMode(BTN_DOWN, INPUT_PULLUP);
-  pinMode(BTN_LEFT, INPUT_PULLUP);
-  pinMode(BTN_B, INPUT_PULLUP);
-  // 34, 35 仅能配置为 INPUT
-  pinMode(BTN_RIGHT, INPUT);
-  pinMode(BTN_A, INPUT);
+    // 2. 初始化 SD 卡 (根据 pins.h，SD_CS 是 22)
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    
+    if (!SD.begin(SD_CS)) {
+        Serial.println("SD Card Mount Failed");
+        display_show_info("Error", "SD Card", "Mount Failed");
+    } else {
+        Serial.println("SD Card OK");
+        display_show_info("Tang Poetry", "Loading...", "SD OK");
+    }
 
-  // 初始化屏幕
-  tft.initR(INITR_REDTAB);
-  tft.setRotation(3); // 横屏显示
-  tft.fillScreen(ST77XX_BLACK);
+    delay(1000);
+    display_clear();
 
-  // 初始化中文字库引擎
-  u8g2Fonts.begin(tft);
-  u8g2Fonts.setFont(u8g2_font_wqy16_t_chinese1);
-  u8g2Fonts.setFontMode(1);
-  u8g2Fonts.setFontDirection(0);
-
-  // 绘制开机 Splash
-  u8g2Fonts.setForegroundColor(ST77XX_WHITE);
-  u8g2Fonts.setCursor(30, 60);
-  u8g2Fonts.print("系统初始化...");
-
-  // 初始化 SD 卡
-  if (!SD.begin(SD_CS)) {
-    tft.fillScreen(ST77XX_BLACK);
-    u8g2Fonts.setForegroundColor(ST77XX_RED);
-    u8g2Fonts.setCursor(20, 60);
-    u8g2Fonts.print("SD卡挂载失败!");
-    while (true); // 死循环停机
-  }
-
-  // 扫描并建立唐诗索引
-  u8g2Fonts.setCursor(30, 80);
-  u8g2Fonts.print("正在建立索引...");
-  buildPoemIndex();
-
-  if (totalPoems == 0) {
-    tft.fillScreen(ST77XX_BLACK);
-    u8g2Fonts.setForegroundColor(ST77XX_RED);
-    u8g2Fonts.setCursor(10, 60);
-    u8g2Fonts.print("未找到 tang.txt 文件");
-    while (true);
-  }
-
-  // 开机完成，发出提示音并显示第一首诗
-  beep();
-  displayPoem(currentPoemIndex);
+    // ==========================================
+    // 3. 此处可以初始化你的唐诗索引引擎与字体
+    // u8g2Fonts.begin(tft);
+    // loadTangPoetryIndex();
+    // ==========================================
 }
 
+// ==========================================
+// 主循环 (Loop)
+// ==========================================
 void loop() {
-  // 读取按键 (低电平触发)
-  bool upPressed = (digitalRead(BTN_UP) == LOW) || (digitalRead(BTN_LEFT) == LOW);
-  bool downPressed = (digitalRead(BTN_DOWN) == LOW) || (digitalRead(BTN_RIGHT) == LOW);
+    // 使用高级防抖函数读取全局按键状态
+    button_state_t btns = buttons_read_debounced();
 
-  if (millis() - lastButtonPress > DEBOUNCE_DELAY) {
-    if (downPressed) {
-      if (currentPoemIndex < totalPoems - 1) {
-        currentPoemIndex++;
-        displayPoem(currentPoemIndex);
-        beep();
-      }
-      lastButtonPress = millis();
-    } 
-    else if (upPressed) {
-      if (currentPoemIndex > 0) {
-        currentPoemIndex--;
-        displayPoem(currentPoemIndex);
-        beep();
-      }
-      lastButtonPress = millis();
-    }
-  }
-}
-
-// ================= 核心逻辑：建立索引 =================
-// 规则：只要遇到空行（连续的换行符），就认为下一行是一首新诗的开始
-void buildPoemIndex() {
-  File file = SD.open("/tang.txt", FILE_READ);
-  if (!file) return;
-
-  totalPoems = 0;
-  poemOffsets[totalPoems++] = 0; // 第一首诗的起点一定是文件头部
-
-  bool lastWasNewline = false;
-  bool inBlankSpace = false;
-
-  while (file.available()) {
-    char c = file.read();
-    if (c == '\n') {
-      if (lastWasNewline) inBlankSpace = true; // 连续两个换行，说明是空行
-      lastWasNewline = true;
-    } else if (c == '\r') {
-      // 忽略 Windows 系统的回车符
-    } else {
-      // 遇到正常字符
-      if (inBlankSpace) {
-        // 如果之前是在空行里，说明现在这个字符是新一首诗的开头
-        if (totalPoems < MAX_POEMS) {
-          poemOffsets[totalPoems++] = file.position() - 1; 
-        }
-        inBlankSpace = false;
-      }
-      lastWasNewline = false;
-    }
-  }
-  file.close();
-  Serial.printf("建立索引完成，共找到 %d 首诗\n", totalPoems);
-}
-
-// ================= 核心逻辑：渲染诗词 =================
-void displayPoem(int index) {
-  if (index < 0 || index >= totalPoems) return;
-
-  tft.fillScreen(ST77XX_BLACK);
-  File file = SD.open("/tang.txt", FILE_READ);
-  if (!file) return;
-
-  // 1. 光标直接跳到这首诗的起点
-  file.seek(poemOffsets[index]);
-  
-  int y = 20; // 初始行高
-  int lineCount = 0;
-
-  // 2. 逐行读取并渲染，直到遇到空行或屏幕填满
-  while (file.available() && y < 120) {
-    String line = file.readStringUntil('\n');
-    line.trim(); // 清除行尾的空格和不可见字符
-
-    if (line.length() == 0) {
-      break; // 遇到空行，说明这首诗结束了
+    // ------------------------------------------
+    // [退出逻辑]：根据 pins.h，BTN_LEFT 被映射到 27 号引脚
+    // 我们将“向左键”作为退出到主菜单的快捷键
+    // ------------------------------------------
+    if (btns.left) {
+        buzzer_beep();     // 退出前调用蜂鸣器发出短促的滴声
+        returnToLauncher();
     }
 
-    // 诗词高亮逻辑：第一行通常是标题，第二行是作者
-    if (lineCount == 0) {
-      u8g2Fonts.setForegroundColor(ST77XX_YELLOW); // 标题黄色
-    } else if (lineCount == 1) {
-      u8g2Fonts.setForegroundColor(ST77XX_CYAN);   // 作者青色
-    } else {
-      u8g2Fonts.setForegroundColor(ST77XX_WHITE);  // 正文白色
+    // ------------------------------------------
+    // [翻页逻辑]：上下键进行诗词切换
+    // ------------------------------------------
+    if (btns.up) {
+        // renderPreviousPoem();
+        Serial.println("Previous Poem");
+        delay(200); // 翻页基础防抖
     }
 
-    u8g2Fonts.setCursor(10, y);
-    u8g2Fonts.print(line);
+    if (btns.down) {
+        // renderNextPoem();
+        Serial.println("Next Poem");
+        delay(200);
+    }
 
-    y += 20; // 行距设置 (字体16px + 间距4px)
-    lineCount++;
-  }
-  file.close();
-
-  // 3. 在右下角绘制页码进度
-  u8g2Fonts.setForegroundColor(COLOR_DARKGREY);
-  u8g2Fonts.setCursor(100, 124);
-  u8g2Fonts.print(String(index + 1) + "/" + String(totalPoems));
-}
-
-// 蜂鸣器提示音
-void beep() {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(20);
-  digitalWrite(BUZZER_PIN, LOW);
+    // ==========================================
+    // 这里放置你的屏幕渲染刷新代码
+    // ==========================================
+    
+    delay(30); // 降低 CPU 占用
 }

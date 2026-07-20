@@ -64,7 +64,7 @@ void setup() {
 
   // 初始化中文字库引擎
   u8g2Fonts.begin(tft);
-  u8g2Fonts.setFont(u8g2_font_wenquanyi_t16_chinese1);
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_chinese1);
   u8g2Fonts.setFontMode(1);
   u8g2Fonts.setFontDirection(0);
 

@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
+#include "display.h" // 核心修改：引入底层已经定义好的 tft 对象
 
 // ==========================================
 // 1. 硬件引脚定义 (沿用你掌机的底层配置)
@@ -11,7 +12,7 @@
 #define BTN_A       34   // 注意: 仅输入引脚
 #define BTN_B       12
 
-TFT_eSPI tft = TFT_eSPI();
+// 【注意：这里原本的 TFT_eSPI tft = TFT_eSPI(); 已经被删掉了】
 
 // ==========================================
 // 2. 游戏全局变量
@@ -21,6 +22,8 @@ int playerX = 60;
 int playerY = 130;
 const int playerWidth = 10;
 const int playerHeight = 10;
+
+// ... 后面的 setup() 和 loop() 代码完全保持不变 ...
 
 // ==========================================
 // 3. 初始化设置

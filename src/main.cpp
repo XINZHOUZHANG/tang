@@ -1,157 +1,113 @@
 #include <Arduino.h>
+#include <SD.h>
+#include <esp_ota_ops.h>
+
+// 引入底层封装好的硬件模块
 #include "pins.h"
 #include "display.h"
 #include "buttons.h"
 #include "buzzer.h"
-#include "sensors.h"
-#include "sd_card.h"
 
-static const uint16_t notes[12] = {
-    262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 466, 494
-};
+// 注意：由于底层换成了 TFT_eSPI，要在屏幕上渲染中文字体，
+// 你后续需要在 platformio.ini 的 lib_deps 中引入 U8g2_for_TFT_eSPI 库。
+// #include <U8g2_for_TFT_eSPI.h>
+// U8G2_FOR_TFT_eSPI u8g2Fonts;
 
-static const uint16_t btn_note[6] = {
-    notes[0],                // LEFT  → C4  262 Hz
-    notes[2],                // UP    → D4  294 Hz
-    notes[4],                // DOWN  → E4  330 Hz
-    notes[7],                // RIGHT → G4  392 Hz
-    notes[9],                // B     → A4  440 Hz
-    (uint16_t)(notes[0] * 2) // A     → C5  524 Hz
-};
+// ==========================================
+// 核心功能：返回 Launcher 启动器
+// ==========================================
+void returnToLauncher() {
+    Serial.println("Preparing to exit to Launcher...");
 
-static const uint8_t field2note[6] = {1, 2, 0, 3, 5, 4};
-
-static button_state_t prev = {0, 0, 0, 0, 0, 0};
-static bool sd_present = false;
-
-// ── Status line helper ───────────────────────────────────────
-// Draws a pre-formatted line at fixed (4, y)
-static void draw_line(int y, const char *fmt, ...)
-{
-    char buf[24];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-
-    tft.fillRect(4, y, 156, 8, TFT_BLACK);
-    tft.setCursor(4, y);
+    // 调用现成的屏幕模块清屏并显示退出提示
+    display_clear();
+    tft.setTextSize(1);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.print(buf);
+    tft.setCursor(10, 60);
+    tft.print("Exiting to Menu...");
+
+    // 寻找出厂分区（Factory Partition），这是 Launcher 系统的驻留位置
+    const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
+
+    if (factory_partition != NULL) {
+        esp_ota_set_boot_partition(factory_partition);
+        delay(500);
+        ESP.restart(); // 强制重启，控制权交还给 Launcher
+    } else {
+        tft.setCursor(10, 80);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.print("Launcher Not Found!");
+    }
 }
 
-// Draws "   SD: OK/--" with colored status
-static void draw_sd_line(int y, bool present)
-{
-    tft.fillRect(4, y, 156, 8, TFT_BLACK);
-    tft.setCursor(4, y);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.print("   SD: ");
-    tft.setTextColor(present ? TFT_GREEN : TFT_RED, TFT_BLACK);
-    tft.print(present ? "OK" : "--");
-}
-
-// ── Button drawing ───────────────────────────────────────────
-//                  [U]         [A]
-//           [L]  ─────  [R]
-//                  [D]     [B]
-
-static const struct { int8_t x, y; } btn_pos[6] = {
-    {46, 68},   // UP    [U]  18px, center 55
-    {46, 92},   // DOWN  [D]  18px, center 55
-    {29, 80},   // LEFT  [L]  18px
-    {63, 80},   // RIGHT [R]  18px
-    {102, 74},  // A     [A]  upper-right of [B]
-    {90, 86},   // B     [B]  between RIGHT & DOWN
-};
-
-static const char *btn_str[6] = {"[U]", "[D]", "[L]", "[R]", "[A]", "[B]"};
-
-static void draw_btn(int i, bool pressed)
-{
-    int x = btn_pos[i].x, y = btn_pos[i].y;
-    int w = strlen(btn_str[i]) * 6;
-    tft.fillRect(x, y, w, 8, TFT_BLACK);
-    tft.setCursor(x, y);
-    tft.setTextColor(pressed ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
-    tft.print(btn_str[i]);
-}
-
-// ── Setup ────────────────────────────────────────────────────
-void setup()
-{
+// ==========================================
+// 初始化设置 (Setup)
+// ==========================================
+void setup() {
     Serial.begin(115200);
     delay(500);
 
+    // 1. 初始化所有底层模块
+    display_init();  
+    buttons_init();  
+    buzzer_init();   
+
+    // 2. 初始化 SD 卡 (根据 pins.h，SD_CS 是 22)
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
+    
+    if (!SD.begin(SD_CS)) {
+        Serial.println("SD Card Mount Failed");
+        display_show_info("Error", "SD Card", "Mount Failed");
+    } else {
+        Serial.println("SD Card OK");
+        display_show_info("Tang Poetry", "Loading...", "SD OK");
+    }
 
-    sd_present = sd_init();
-    if (sd_present) Serial.println("SD card OK");
-    else           Serial.println("SD card not found");
+    delay(1000);
+    display_clear();
 
-    display_init();
-    sensors_init();
-    buttons_init();
-    buzzer_init();
-
-    // Title
-    int tw = strlen("XIAO MIAO DEMO") * 6;
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.setCursor((160 - tw) / 2, 10);
-    tft.print("XIAO MIAO DEMO");
-
-    tft.drawFastHLine(0, 22, 160, TFT_DARKGREY);
-
-    draw_sd_line(28, sd_present);
-    draw_line(38, "Light: %u", 0);
-    draw_line(48, " Temp: %u", 0);
-
-    tft.drawFastHLine(0, 60, 160, TFT_DARKGREY);
-
-    for (int i = 0; i < 6; i++) draw_btn(i, false);
+    // ==========================================
+    // 3. 此处可以初始化你的唐诗索引引擎与字体
+    // u8g2Fonts.begin(tft);
+    // loadTangPoetryIndex();
+    // ==========================================
 }
 
-// ── Loop ─────────────────────────────────────────────────────
-void loop()
-{
-    uint16_t light = sensor_read_light();
-    uint16_t temp  = sensor_read_temp();
+// ==========================================
+// 主循环 (Loop)
+// ==========================================
+void loop() {
+    // 使用高级防抖函数读取全局按键状态
+    button_state_t btns = buttons_read_debounced();
 
-    static uint16_t last_light = 0xFFFF, last_temp = 0xFFFF;
-
-    if (light != last_light) {
-        draw_line(38, "Light: %u", light);
-        last_light = light;
-    }
-    if (temp != last_temp) {
-        draw_line(48, " Temp: %u", temp);
-        last_temp = temp;
-    }
-
-    button_state_t cur = buttons_read_debounced();
-    bool cur_arr[6]  = {cur.up, cur.down, cur.left, cur.right, cur.a, cur.b};
-    bool prev_arr[6] = {prev.up, prev.down, prev.left, prev.right, prev.a, prev.b};
-
-    for (int i = 0; i < 6; i++) {
-        if (cur_arr[i] != prev_arr[i]) draw_btn(i, cur_arr[i]);
+    // ------------------------------------------
+    // [退出逻辑]：根据 pins.h，BTN_LEFT 被映射到 27 号引脚
+    // 我们将“向左键”作为退出到主菜单的快捷键
+    // ------------------------------------------
+    if (btns.left) {
+        buzzer_beep();     // 退出前调用蜂鸣器发出短促的滴声
+        returnToLauncher();
     }
 
-    bool active[6] = {false};
-    for (int i = 0; i < 6; i++) active[field2note[i]] = cur_arr[i];
-
-    int playing = -1;
-    for (int i = 0; i < 6; i++) {
-        if (active[i]) { playing = i; break; }
+    // ------------------------------------------
+    // [翻页逻辑]：上下键进行诗词切换
+    // ------------------------------------------
+    if (btns.up) {
+        // renderPreviousPoem();
+        Serial.println("Previous Poem");
+        delay(200); // 翻页基础防抖
     }
 
-    static int prev_playing = -1;
-    if (playing != prev_playing) {
-        if (playing >= 0) buzzer_tone(btn_note[playing], 0);
-        else              buzzer_no_tone();
-        prev_playing = playing;
+    if (btns.down) {
+        // renderNextPoem();
+        Serial.println("Next Poem");
+        delay(200);
     }
 
-    prev = cur;
-    delay(30);
+    // ==========================================
+    // 这里放置你的屏幕渲染刷新代码
+    // ==========================================
+    
+    delay(30); // 降低 CPU 占用
 }

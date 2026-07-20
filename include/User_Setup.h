@@ -1,0 +1,24 @@
+#pragma once
+
+#define ST7735_DRIVER
+#define ST7735_REDTAB
+#define TFT_WIDTH  128
+#define TFT_HEIGHT 160
+
+#define TFT_CS     5
+#define TFT_DC     4
+#define TFT_RST    19     // TFT_eSPI handles reset, then SPI takes over MISO
+#define TFT_SCLK   18
+#define TFT_MOSI   23
+#define TFT_MISO   19     // shared with TFT RST; SPI takes over after manual reset
+
+#define SPI_FREQUENCY       20000000
+#define SPI_READ_FREQUENCY  10000000
+
+#define TFT_RGB_ORDER 1
+
+#define LOAD_GLCD
+#define SPI_USE_3WIRE  false
+#define SUPPORT_TRANSACTIONS
+
+#define DISABLE_ALL_LIBRARY_WARNINGS

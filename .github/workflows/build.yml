@@ -1,25 +1,23 @@
 name: Build ESP32 Firmware
 
-# 触发条件：当 main 分支有代码推送（push）或合并（PR）时触发编译
+# 触发条件
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  # 允许你在 GitHub 网页上收到手动点击触发编译
   workflow_dispatch:
+
+# 核心修改 1：必须显式授予 Action 写入代码库以创建 Release 的权限
+permissions:
+  contents: write
 
 jobs:
   build:
-    # 使用 GitHub 提供的最新版 Ubuntu 虚拟机作为编译服务器
     runs-on: ubuntu-latest
 
     steps:
-    # 1. 将你的代码仓库克隆到虚拟机中
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 2. 缓存 PlatformIO 的依赖项，避免每次都重新下载，大幅加快后续的编译速度
     - name: Cache PlatformIO
       uses: actions/cache@v4
       with:
@@ -28,25 +26,32 @@ jobs:
           .pio
         key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
 
-    # 3. 在虚拟机中搭建 Python 环境（PlatformIO 依赖 Python）
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
-    # 4. 安装 PlatformIO 核心编译工具
     - name: Install PlatformIO
       run: |
         python -m pip install --upgrade pip
         pip install --upgrade platformio
 
-    # 5. 执行编译（它会自动读取 platformio.ini 并下载相关的屏幕、中文库）
     - name: Run PlatformIO Build
       run: pio run
 
-    # 6. 将编译出的 firmware.bin 重命名，并提取成可下载的制品 (Artifact)
-    - name: Upload Firmware Artifact
-      uses: actions/upload-artifact@v4
+    # 核心修改 2：把隐藏文件夹里的 firmware.bin 拷贝出来并重命名为 tang.bin
+    - name: Prepare Firmware
+      run: cp .pio/build/esp32dev/firmware.bin tang.bin
+
+    # 核心修改 3：使用 release 插件自动创建发布版本并附带 tang.bin
+    - name: Create Release and Upload Firmware
+      uses: softprops/action-gh-release@v2
       with:
-        name: TangPoetry-Firmware-${{ github.sha }}
-        path: .pio/build/esp32dev/firmware.bin
+        # 自动生成版本号，例如 v1.0.5 (基于 GitHub 运行次数累加)
+        tag_name: v1.0.${{ github.run_number }}
+        name: "唐诗阅读器 更新 #${{ github.run_number }}"
+        body: "自动化编译生成的唐诗阅读器固件。下载 `tang.bin` 放入 SD 卡即可使用。"
+        # 指定需要作为附件上传的文件
+        files: tang.bin
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
